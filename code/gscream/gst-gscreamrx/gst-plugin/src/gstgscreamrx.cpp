@@ -416,38 +416,37 @@ gst_g_scream_rx_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
 {
   GstgScreamRx *filter;
   gboolean ret;
-
   filter = GST_GSCREAMRX (parent);
-if(DOSCREAM)   {
-  if (filter->rtpSession == NULL) {
-    GstElement *pipe = GST_ELEMENT_PARENT(parent);
-    //g_print("\ngscream name2 %s \n", gst_element_get_name(pipe));
-    GstElement *rtpbin = gst_bin_get_by_name_recurse_up(GST_BIN(pipe), "rtpbin");
-    g_assert(rtpbin);
-    g_signal_emit_by_name(rtpbin,"get_internal_session", 0, &(filter->rtpSession));
+  if(DOSCREAM)   {
+    if (filter->rtpSession == NULL) {
+      GstElement *parentBin = GST_ELEMENT_PARENT(parent);
+      //g_print("\ngscream name2 %s \n", gst_element_get_name(pipe));
+      GstElement *rtpbin = gst_bin_get_by_name_recurse_up(GST_BIN(parentBin), "rtpbin");
+      GstElement *pipe = GST_ELEMENT_PARENT(rtpbin);
+      g_assert(rtpbin);
+      g_signal_emit_by_name(rtpbin,"get_internal_session", 0, &(filter->rtpSession));
+      g_object_set(filter->rtpSession, "rtcp-reduced-size", true, NULL);
 
-    g_object_set(&(filter->rtpSession), "rtcp-reduced-size", true, NULL);
+      GstClock *clock = gst_pipeline_get_clock((GstPipeline*) pipe);
+      filter->clockId=gst_clock_new_periodic_id(clock,gst_clock_get_internal_time(clock),5000000);
+      g_assert(filter->clockId);
+      GstClockReturn t = gst_clock_id_wait_async(filter->clockId, rtcpPeriodicTimer, (gpointer) filter, NULL);
+      g_print("SINK EVENT \n");
 
-    GstClock *clock = gst_pipeline_get_clock((GstPipeline*) pipe);
-    filter->clockId=gst_clock_new_periodic_id(clock,gst_clock_get_internal_time(clock),5000000);
-    g_assert(filter->clockId);
-    GstClockReturn t = gst_clock_id_wait_async(filter->clockId, rtcpPeriodicTimer, (gpointer) filter, NULL);
-    g_print("SINK EVENT \n");
-
-    g_print("\n\n  ENABLE CALLBACK  \n\n");
-    g_object_set((filter->rtpSession),
-      "rtcp-min-interval", 500000000,
-      "rtcp-fraction", 0.5,
-      "bandwidth", 10000000.0,
-      //"rtcp-rr-bandwidth", 40000,
-      //"rtcp-min-interval", 100000,
-      //"rtcp-fraction", 50000.0,
-      //"bandwidth", 0.0,
-      //"rtcp-rr-bandwidth", 40000,
-      "rtp-profile", GST_RTP_PROFILE_AVPF,
-      NULL);
-    g_signal_connect_after((filter->rtpSession), "on-sending-rtcp", G_CALLBACK(on_sending_rtcp), filter);
-}
+      g_print("\n\n  ENABLE CALLBACK  \n\n");
+      g_object_set((filter->rtpSession),
+        "rtcp-min-interval", 500000000,
+        "rtcp-fraction", 0.5,
+        "bandwidth", 10000000.0,
+        //"rtcp-rr-bandwidth", 40000,
+        //"rtcp-min-interval", 100000,
+        //"rtcp-fraction", 50000.0,
+        //"bandwidth", 0.0,
+        //"rtcp-rr-bandwidth", 40000,
+        "rtp-profile", GST_RTP_PROFILE_AVPF,
+        NULL);
+      g_signal_connect_after((filter->rtpSession), "on-sending-rtcp", G_CALLBACK(on_sending_rtcp), filter);
+    }
   }
   GST_LOG_OBJECT (filter, "Received %s event: %" GST_PTR_FORMAT,
       GST_EVENT_TYPE_NAME (event), event);

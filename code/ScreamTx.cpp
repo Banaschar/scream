@@ -694,7 +694,7 @@ void ScreamTx::incomingStandardizedFeedback(uint32_t time_ntp,
 		}
 
 		if (fp_log && completeLogItem) {
-			fprintf(fp_log, " %d,%d,%1.0f,%d,%d,%d,%1.0f,%1.0f,%1.0f,%1.0f,%s", cwnd, bytesInFlight, rateTransmitted, streamId, bytesNewlyAcked, ecnCeMarkedBytes, stream->rateRtp, stream->rateTransmitted, stream->rateAcked, stream->rateLost,detailedLogExtraData);
+			fprintf(fp_log, "Bla: %d,%d,%1.0f,%d,%d,%d,%1.0f,%1.0f,%1.0f,%1.0f,%s", cwnd, bytesInFlight, rateTransmitted, streamId, bytesNewlyAcked, ecnCeMarkedBytes, stream->rateRtp, stream->rateTransmitted, stream->rateAcked, stream->rateLost,detailedLogExtraData);
 		}
 
 		if (isL4s) {
@@ -918,7 +918,7 @@ void ScreamTx::getLog(float time, char *s) {
 
 void ScreamTx::getShortLog(float time, char *s) {
 	int inFlightMax = std::max(bytesInFlight, bytesInFlightHistHiMem);
-	sprintf(s, "%4.3f, %4.3f, %6d, %6d, %6.0f, %1d, ",
+	sprintf(s, "Log: %4.3f, %4.3f, %6d, %6d, %6.0f, %1d, ",
 		queueDelayMax, sRtt,
 		cwnd, bytesInFlightLog, rateTransmitted / 1000.0f, isInFastStart());
 	bytesInFlightLog = bytesInFlight;
@@ -926,7 +926,7 @@ void ScreamTx::getShortLog(float time, char *s) {
 	for (int n = 0; n < nStreams; n++) {
 		Stream *tmp = streams[n];
 		char s2[200];
-		sprintf(s2, "%4.3f, %6.0f, %6.0f, %6.0f, %5.0f, ",
+		sprintf(s2, "PerStream: %4.3f, %6.0f, %6.0f, %6.0f, %5.0f, ",
 			std::max(0.0f, tmp->rtpQueue->getDelay(time)),
 			tmp->targetBitrate / 1000.0f, tmp->rateRtp / 1000.0f,
 			tmp->rateTransmitted / 1000.0f,
@@ -1835,7 +1835,7 @@ void ScreamTx::Stream::updateTargetBitrate(uint32_t time_ntp) {
 			* throughput in the initial phase.
 			*/
 			rtpQueue->clear();
-			cerr << time_ntp / 65536.0f << " RTP queue discarded for SSRC " << ssrc << endl;
+			cerr << time_ntp / 65536.0f << " RTP queue discarded (LOSS) for SSRC " << ssrc << endl;
 
 			rtpQueueDiscard = true;
 

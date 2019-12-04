@@ -1,0 +1,6 @@
+_Z12txTimerEventP9_GstClockmPvS1_
+_Z7getTimeP13_GstgScreamTxPfPj
+_ZN8RtpQueue4pushEP10_GstBufferitf
+gst_g_scream_tx_get_type
+gst_plugin_gscreamtx_get_desc
+gst_plugin_gscreamtx_register

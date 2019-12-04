@@ -437,11 +437,11 @@ Copyright (C) 2012 Free Software Foundation, Inc.
 This config.status script is free software; the Free Software Foundation
 gives unlimited permission to copy, distribute and modify it."
 
-ac_pwd='/home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin'
+ac_pwd='/home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin'
 srcdir='.'
 INSTALL='/usr/bin/install -c'
 MKDIR_P='/bin/mkdir -p'
-AWK='mawk'
+AWK='gawk'
 test -n "$AWK" || AWK=awk
 # The default lists apply if the user does not specify any file.
 ac_need_defaults=:
@@ -679,7 +679,7 @@ finish_cmds='PATH="\$PATH:/sbin" ldconfig -n $libdir'
 finish_eval=''
 hardcode_into_libs='yes'
 sys_lib_search_path_spec='/usr/lib/gcc/x86_64-linux-gnu/7 /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib '
-configure_time_dlsearch_path='/lib /usr/lib /usr/lib/x86_64-linux-gnu/libfakeroot /usr/local/lib /usr/local/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu '
+configure_time_dlsearch_path='/lib /usr/lib /usr/lib/x86_64-linux-gnu/libfakeroot /usr/local/lib/i386-linux-gnu /lib/i386-linux-gnu /usr/lib/i386-linux-gnu /usr/local/lib/i686-linux-gnu /lib/i686-linux-gnu /usr/lib/i686-linux-gnu /usr/local/lib /usr/local/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu '
 configure_time_lt_sys_library_path=''
 hardcode_action='immediate'
 enable_dlopen='unknown'
@@ -952,17 +952,17 @@ S["am__tar"]="$${TAR-tar} chof - \"$$tardir\""
 S["AMTAR"]="$${TAR-tar}"
 S["am__leading_dot"]="."
 S["SET_MAKE"]=""
-S["AWK"]="mawk"
+S["AWK"]="gawk"
 S["mkdir_p"]="$(MKDIR_P)"
 S["MKDIR_P"]="/bin/mkdir -p"
 S["INSTALL_STRIP_PROGRAM"]="$(install_sh) -c -s"
 S["STRIP"]="strip"
-S["install_sh"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/install-sh"
-S["MAKEINFO"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/missing makeinfo"
-S["AUTOHEADER"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/missing autoheader"
-S["AUTOMAKE"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/missing automake-1.15"
-S["AUTOCONF"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/missing autoconf"
-S["ACLOCAL"]="${SHELL} /home/ingemar/gst/gscream/gst-gscreamrx/gst-plugin/missing aclocal-1.15"
+S["install_sh"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/install-sh"
+S["MAKEINFO"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/missing makeinfo"
+S["AUTOHEADER"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/missing autoheader"
+S["AUTOMAKE"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/missing automake-1.15"
+S["AUTOCONF"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/missing autoconf"
+S["ACLOCAL"]="${SHELL} /home/christoph/Development/scream/code/gscream/gst-gscreamrx/gst-plugin/missing aclocal-1.15"
 S["VERSION"]="1.0.0"
 S["PACKAGE"]="my-plugin-package"
 S["CYGPATH_W"]="echo"
