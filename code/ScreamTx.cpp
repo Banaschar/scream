@@ -694,7 +694,7 @@ void ScreamTx::incomingStandardizedFeedback(uint32_t time_ntp,
 		}
 
 		if (fp_log && completeLogItem) {
-			fprintf(fp_log, "Bla: %d,%d,%1.0f,%d,%d,%d,%1.0f,%1.0f,%1.0f,%1.0f,%s", cwnd, bytesInFlight, rateTransmitted, streamId, bytesNewlyAcked, ecnCeMarkedBytes, stream->rateRtp, stream->rateTransmitted, stream->rateAcked, stream->rateLost,detailedLogExtraData);
+			fprintf(fp_log, "LossLog: %d,%d,%1.0f,%d,%d,%d,%1.0f,%1.0f,%1.0f,%1.0f,%s", cwnd, bytesInFlight, rateTransmitted, streamId, bytesNewlyAcked, ecnCeMarkedBytes, stream->rateRtp, stream->rateTransmitted, stream->rateAcked, stream->rateLost,detailedLogExtraData);
 		}
 
 		if (isL4s) {
@@ -1895,6 +1895,7 @@ void ScreamTx::Stream::updateTargetBitrate(uint32_t time_ntp) {
 			* Function is however disabled initially as there is no reliable estimate of the
 			* throughput in the initial phase.
 			*/
+			cerr << "Size of discarded queue: " << rtpQueue->sizeOfQueue() << endl;
 			rtpQueue->clear();
 			cerr << time_ntp / 65536.0f << " RTP queue discarded for SSRC " << ssrc << endl;
 

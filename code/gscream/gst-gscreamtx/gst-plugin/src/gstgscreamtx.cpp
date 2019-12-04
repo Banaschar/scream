@@ -247,7 +247,7 @@ gboolean txTimerEvent(GstClock *clock, GstClockTime t, GstClockID id, gpointer u
 static gboolean
 on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *object)
 {
-  g_print("SCREAM: received trcp\n");
+  //g_print("SCREAM: received trcp\n");
   //GstgScreamTx *filter = GST_GSCREAMTX (object);
   GstgScreamTx *filter = (GstgScreamTx*)object;
   //g_print("   PTR1 %x %x %x\n",  filter, filter_ , session);
@@ -271,7 +271,7 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
       for (; has_packet ; has_packet = gst_rtcp_packet_move_to_next(&rtcp_packet)) {
         packet_type = gst_rtcp_packet_get_type(&rtcp_packet);
         if (packet_type == GST_RTCP_TYPE_RTPFB) {
-          g_print("SCREAM: Received rtpfb\n");
+          //g_print("SCREAM: Received rtpfb\n");
           guint8 *fci_buf = gst_rtcp_packet_fb_get_fci(&rtcp_packet);
           guint16 fci_len = gst_rtcp_packet_fb_get_fci_length(&rtcp_packet);
           int size =  (fci_len)*4+12;
@@ -315,7 +315,8 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
               break;
           }
           pthread_mutex_unlock(&filter_->lock_scream);
-
+          if (rate <= 0)
+            g_print("RATE: %i\n", rate);
           if (true && rate > 0 && time-filter_->lastRateChangeT > 0.2) {
           //if (time-filter_->lastRateChangeT > 0.1) {
             //int rate = 1000000*(1+ (int(time/10) % 2));
@@ -343,7 +344,6 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
 
             if (filter_->media_src == 1)
               g_object_set(G_OBJECT(filter_->encoder), "annotation-text", buf2, NULL);
-
             g_print("%6.3f %s\n",time,buf2);
           }
 
@@ -450,7 +450,6 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
   getTime(filter,&time,&time_ntp);
   filter->screamTx->newMediaFrame(time_ntp, ssrc_h, size);
   pthread_mutex_unlock(&filter->lock_scream);
-
   if (false && time-filter->lastRateChangeT > 0.1) {
             int rate = 1000;//1000*(1+ 3*(int(time/10) % 2));
 
@@ -459,7 +458,7 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
             char buf2[1000];
 
             filter_->screamTx->getShortLog(time, buf2);
-            g_print("%6.3f %s  %d\n",time,buf2, rate);
+            g_print("%6.3f HARD RATE RESET: %s  %d\n",time,buf2, rate);
 
   }
 
