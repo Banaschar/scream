@@ -179,6 +179,18 @@ ScreamTx::ScreamTx(float lossBeta_,
 	queueDelayMin = 1000.0;
 
 	statistics = new Statistics();
+	/* Quic feedback */
+	fb.rtt_minimum = 0;
+	fb.rtt_smoothed = 0;
+	fb.rtt_latest= 0;
+	fb.cwnd = cwnd;
+	fb.bytes_in_flight = 0;
+	fb.bytes_sent = 0;
+	fb.bytes_lost = 0;
+	fb.bytes_acked = 0;
+	fb.packets_sent = 0;
+	fb.packets_lost = 0;
+	fb.packets_acked = 0;
 }
 
 ScreamTx::~ScreamTx() {
@@ -297,6 +309,33 @@ RtpQueueIface * ScreamTx::getStreamQueue(uint32_t ssrc) {
 	  return stream->rtpQueue;
 }
 
+/* Quic */
+void ScreamTx::newMediaFrameQuic(uint32_t time_ntp, uint32_t ssrc, int bytesRtp) {
+	if (!isInitialized) initialize(time_ntp);
+
+	int id;
+	Stream *stream = getStream(ssrc, id);
+	stream->updateTargetBitrate(time_ntp);
+	if (time_ntp - lastCwndUpdateT_ntp < 32768) { // 32768 = 0.5s in NTP domain
+		/*
+		* We expect feedback at least every 500ms
+		* to update the target rate.
+		*/
+		stream->updateTargetBitrate(time_ntp);
+
+		stream->bytesRtp += bytesRtp;
+		/*
+		* Need to update MSS here, otherwise it will be nearly impossible to
+		* transmit video packets, this because of the small initial MSS
+		* which is necessary to make SCReAM work with audio only
+		*/
+		int sizeOfNextRtp = stream->rtpQueue->sizeOfNextRtp();
+		mss = std::max(mss, sizeOfNextRtp);
+		if (!openWindow)
+			cwndMin = std::max(cwndMinLow,2 * mss);
+		cwnd = max(cwnd, cwndMin);
+	}
+}
 
 /*
 * New media frame
@@ -338,6 +377,137 @@ void ScreamTx::newMediaFrame(uint32_t time_ntp, uint32_t ssrc, int bytesRtp) {
 			cwndMin = std::max(cwndMinLow,2 * mss);
 		cwnd = max(cwnd, cwndMin);
 	}
+}
+
+float ScreamTx::isOkToTransmitQuic(uint32_t time_ntp, uint32_t &ssrc) {
+	if (!isInitialized) initialize(time_ntp);
+
+	uint32_t tmp = kRateUpdateInterval_ntp;
+
+	if (rateAcked < 50000.0f) {
+		tmp *= 2;
+	}
+
+	if (time_ntp - lastRateUpdateT_ntp > tmp) {
+		rateTransmitted = 0.0f;
+		rateAcked = 0.0f;
+		float rateRtp = 0.0f;
+		for (int n = 0; n < nStreams; n++) {
+			streams[n]->updateRate(time_ntp);
+			rateTransmitted += streams[n]->rateTransmitted;
+			rateRtp += streams[n]->rateRtp;
+			rateTransmittedAvg = 0.9f*rateTransmittedAvg + 0.1f*rateTransmitted;
+			rateAcked += streams[n]->rateAcked;
+			if (n == 0)
+				statistics->add(streams[0]->rateTransmitted, streams[0]->rateLost, sRtt, queueDelay);
+		}
+		lastRateUpdateT_ntp = time_ntp;
+		/*
+		* Adjust stream priorities
+		* QUIC: Some black magic is happening here
+		* Irrelevant for one stream
+		* TODO: needs queue delay stuff
+		*/
+		//adjustPriorities(time_ntp);
+
+		/*
+		* Update maxRate
+		*/
+		maxRate = 0.0f;
+		for (int n = 0; n < nStreams; n++)
+			maxRate += streams[n]->getMaxRate();
+
+		/*
+		* Updated target bitrates if total RTP bitrate
+		* exceeds maxTotalBitrate
+		*/
+		if (maxTotalBitrate > 0) {
+			float tmp = maxTotalBitrate * 0.9f;
+			if (rateRtp > tmp) {
+				inFastStart = false;
+				/*
+				* Use a little safety margin because the video coder
+				* can occasionally send at a higher bitrate than the target rate
+				*/
+				float delta = (rateRtp - tmp) / tmp;
+				delta /= kRateUpDateSize;
+				/*
+				* The target bitrate for each stream should be adjusted down by the same fraction
+				*/
+				for (int n = 0; n < nStreams; n++) {
+					Stream* stream = streams[n];
+					stream->targetBitrate *= (1.0f - delta);
+					stream->targetBitrateI = streams[n]->targetBitrate;
+					stream->lastBitrateAdjustT_ntp = time_ntp;
+				}
+			}
+		}
+	}
+
+	/*
+	* Get index to the prioritized RTP queue
+	*/
+	Stream* stream = getPrioritizedStream(time_ntp);
+
+	if (stream == NULL)
+		/*
+		* No RTP packets to transmit
+		*/
+		return -1.0f;
+	ssrc = stream->ssrc;
+
+	bytesInFlightMaxHi = std::max(bytesInFlight, bytesInFlightMaxHi);
+
+	/*
+	* Update bytes in flight history for congestion window validation
+	* Quic: Skip, we don't need this
+	* TODO: Think about that
+	*/
+	// mising here
+
+	int sizeOfNextRtp = stream->rtpQueue->sizeOfNextRtp();
+	if (sizeOfNextRtp == -1) {
+		return -1.0f;
+	}
+	/*
+	* Determine if window is large enough to transmit
+	* an RTP packet
+	*/
+	bool exit = false;
+	if (queueDelay < queueDelayTarget)
+		exit = (bytesInFlight + sizeOfNextRtp) > cwnd + mss;
+	else
+		exit = (bytesInFlight + sizeOfNextRtp) > cwnd;
+	/*
+	* Enforce packet pacing
+	*/
+	float retVal = 0.0f;
+	uint32_t tmp_l = nextTransmitT_ntp - time_ntp;
+	if (kEnablePacketPacing && (nextTransmitT_ntp > time_ntp) && (tmp_l < 0xFFFF0000)) {
+		retVal = (nextTransmitT_ntp - time_ntp) * ntp2SecScaleFactor;
+	}
+
+	/*
+	* A retransmission time out mechanism to avoid deadlock
+	*/
+	if (time_ntp - lastTransmitT_ntp > 32768 && lastTransmitT_ntp < time_ntp) { // 500ms in NTP domain
+		for (int n = 0; n < kMaxTxPackets; n++) {
+			stream->txPackets[n].isUsed = false;
+		}
+		bytesInFlight = 0;
+		exit = false;
+		retVal = 0.0f;
+	}
+
+	if (!exit) {
+		/*
+		* Return value 0.0 = RTP packet can be immediately transmitted
+		*/
+		return retVal;
+	}
+
+	return -1.0f;
+
 }
 
 /*
@@ -502,6 +672,10 @@ float ScreamTx::isOkToTransmit(uint32_t time_ntp, uint32_t &ssrc) {
 	return -1.0f;
 }
 
+/* QUIC. TODO: Add quic version without cwnd changes
+ * Or maybe not. CHeck what !openWindow does
+ */
+
 /*
 * RTP packet transmitted
 */
@@ -658,6 +832,64 @@ void ScreamTx::incomingStandardizedFeedback(uint32_t time_ntp,
 		if ((N + 1) % 2 == 1) {
 			ptr += 2;
 		}
+	}
+}
+
+/*
+ * Use all quic values directly, e.g. congestion control is done by quic
+ * Therefore we set the cwnd directly
+ */ 
+void ScreamTx::incomingStandardizedFeedbackQuic(uint32_t time_ntp,
+	uint32_t ssrc, uint64_t packets_lost, uint32_t quic_cwnd, uint64_t bytes_lost,
+	uint64_t bytes_acked, uint64_t packets_acked) {
+	int streamId = -1;
+
+	// TODO: Do I need this?
+	accBytesInFlightMax += bytesInFlight;
+	nAccBytesInFlightMax++;
+	Stream *stream = getStream(ssrc, streamId);
+	if (stream == 0) {
+		return;
+	}
+
+	if (packets_lost > fb.packets_lost) {
+		fb.packets_lost = packets_lost;
+		stream->repairLoss = true;
+		stream->lossEventFlag = true;
+		lastLossEventT_ntp = time_ntp;
+		for (int n = 0; n < nStreams; n++) {
+			Stream *tmp = streams[n];
+			if (lossEvent)
+				tmp->lossEventFlag = true;
+			else
+				tmp->ecnCeEventFlag = true;
+		}
+	}
+	fb.packets_lost = packets_lost;
+
+	/* bytes_acked */
+	stream->bytesLost = bytes_lost - fb.bytes_lost;
+	stream->bytesAcked = bytes_acked - fb.bytes_acked;
+	fb.bytes_acked = bytes_acked;
+	fb.bytes_lost = bytes_lost;
+	fb.packets_acked = packets_acked - fb.packets_acked;
+	bytesInFlight -= fb.bytes_acked;
+	if (bytesInFlight < 0)
+		bytesInFlight = 0;
+
+	/* TODO:
+	 * Maybe update cwnd everytime it's updated by quic?
+	 */
+	if (lastCwndUpdateT_ntp == 0)
+		lastCwndUpdateT_ntp = time_ntp;
+
+	if (time_ntp - lastCwndUpdateT_ntp > 655) { // 10ms in NTP domain
+		/*
+		* There is no gain with a too frequent CWND update
+		* An update every 10ms is fast enough even at very high high bitrates
+		*/
+		cwnd = quic_cwnd;
+		lastCwndUpdateT_ntp = time_ntp;
 	}
 }
 
@@ -1775,6 +2007,211 @@ void ScreamTx::Stream::updateTargetBitrateI(float br) {
 		targetBitrateI = std::max(targetBitrateI, targetBitrateHist[n]);
 	}
 
+}
+
+void ScreamTx::Stream::updateTargetBitrateQuic(uint32_t time_ntp) {
+	float br = getMaxRate();
+	float rateRtpLimit = br;
+	if (initTime_ntp == 0) {
+		initTime_ntp = time_ntp;
+		lastRtpQueueDiscardT_ntp = time_ntp;
+	}
+	if (lastBitrateAdjustT_ntp == 0) lastBitrateAdjustT_ntp = time_ntp;
+	isActive = true;
+	lastFrameT_ntp = time_ntp;
+
+	if (lossEventFlag) {
+		if (time_ntp - lastTargetBitrateIUpdateT_ntp > 2000000) {
+			updateTargetBitrateI(br);
+			lastTargetBitrateIUpdateT_ntp = time_ntp;
+
+			targetBitrate = std::max(minBitrate, targetBitrate*lossEventRateScale);
+
+			float rtpQueueDelay = rtpQueue->getDelay(time_ntp * ntp2SecScaleFactor);
+			if (rtpQueueDelay > maxRtpQueueDelay &&
+				(time_ntp - lastRtpQueueDiscardT_ntp > kMinRtpQueueDiscardInterval_ntp)) {
+				/*
+				* RTP queue is cleared as it is becoming too large,
+				* Function is however disabled initially as there is no reliable estimate of the
+				* throughput in the initial phase.
+				*/
+				rtpQueue->clear();
+				cerr << time_ntp / 65536.0f << " RTP queue discarded (LOSS) for SSRC " << ssrc << endl;
+
+				rtpQueueDiscard = true;
+
+				lastRtpQueueDiscardT_ntp = time_ntp;
+				targetRateScale = 1.0;
+				txSizeBitsAvg = 0.0f;
+			}
+
+			lossEventFlag = false;
+			ecnCeEventFlag = false;
+			lastBitrateAdjustT_ntp = time_ntp;
+		}
+	} else {
+		if (time_ntp - lastBitrateAdjustT_ntp < kRateAdjustInterval_ntp)
+			return;
+		/*
+		* A scale factor that is dependent on the inflection point
+		* i.e the last known highest video bitrate
+		*/
+		float sclI = (targetBitrate - targetBitrateI) / targetBitrateI;
+		sclI *= 4;
+		sclI = std::max(0.2f, std::min(1.0f, sclI*sclI));
+		float increment = 0.0f;
+
+		/*
+		* Size of RTP queue [bits]
+		* As this function is called immediately after a
+		* video frame is produced, we need to accept the new
+		* RTP packets in the queue, we subtract a number of bytes correspoding to the size
+		* of the last frame (including RTP overhead), this is simply the aggregated size
+		* of the RTP packets with the highest RTP timestamp
+		* txSizeBits is the number of bits in the RTP queue, this is limited
+		* to just enable small adjustments of the bitrate when the RTP queue grows
+		*/
+		int lastBytes = rtpQueue->getSizeOfLastFrame();
+		int txSizeBitsLimit = (int)(targetBitrate*0.02);
+		int txSizeBits = std::max(0, rtpQueue->bytesInQueue() - lastBytes) * 8;
+		txSizeBits = std::min(txSizeBits, txSizeBitsLimit);
+
+		const float alpha = 0.5f;
+
+		txSizeBitsAvg = txSizeBitsAvg * alpha + txSizeBits * (1.0f - alpha);
+		/*
+		* tmp is a local scaling factor that makes rate adaptation sligthly more
+		* aggressive when competing flows (e.g file transfers) are detected
+		*/
+		float rampUpSpeedTmp = std::min(rampUpSpeed, targetBitrate*rampUpScale);
+
+		/* QUIC. TODO: CompetingFlows requires calc of OWD and queue Delay */
+		/*
+		if (parent->isCompetingFlows()) {
+			rampUpSpeedTmp *= 2.0f;
+		}
+		*/
+		float rtpQueueDelay = rtpQueue->getDelay(time_ntp * ntp2SecScaleFactor);
+		if (rtpQueueDelay > maxRtpQueueDelay &&
+			(time_ntp - lastRtpQueueDiscardT_ntp > kMinRtpQueueDiscardInterval_ntp)) {
+			/*
+			* RTP queue is cleared as it is becoming too large,
+			* Function is however disabled initially as there is no reliable estimate of the
+			* throughput in the initial phase.
+			*/
+			cerr << "Size of discarded queue: " << rtpQueue->sizeOfQueue() << endl;
+			rtpQueue->clear();
+			cerr << time_ntp / 65536.0f << " RTP queue discarded for SSRC " << ssrc << endl;
+
+			rtpQueueDiscard = true;
+
+			lastRtpQueueDiscardT_ntp = time_ntp;
+			targetRateScale = 1.0;
+			txSizeBitsAvg = 0.0f;
+		} else if (parent->inFastStart && rtpQueueDelay < 0.1f) {
+			/*
+			* Increment bitrate, limited by the rampUpSpeed
+			*/
+			increment = rampUpSpeedTmp * (kRateAdjustInterval_ntp * ntp2SecScaleFactor);
+			/*
+			* Limit increase rate near the last known highest bitrate or if priority is low
+			*/
+			increment *= sclI * sqrt(targetPriority);
+			/*
+			* No increase if the actual coder rate is lower than the target
+			*/
+			if (targetBitrate > rateRtpLimit*1.25f)
+				increment = 0;
+			/*
+			* Add increment
+			*/
+			targetBitrate += increment;
+			wasFastStart = true;
+		} else {
+			if (wasFastStart) {
+				wasFastStart = false;
+				if (time_ntp - lastTargetBitrateIUpdateT_ntp > 131072) { // 2s in NTP domain
+					/*
+					* The timing constraint avoids that targetBitrateI
+					* is set too low in cases where a
+					* congestion event is prolonged
+					*/
+					updateTargetBitrateI(br);
+					lastTargetBitrateIUpdateT_ntp = time_ntp;
+				}
+			}
+
+			/*
+			* Update target rate
+			* At very low bitrates it is necessary to actively try to push the
+			*  the bitrate up some extra
+			*/
+			float incrementScale = 1.0f + 0.05f*std::min(1.0f, 50000.0f / targetBitrate);
+
+			float increment = incrementScale * br;
+
+			/* Has stuff I don't get */
+			/*
+			if (!parent->isL4s || parent->l4sAlpha < 0.001) {
+				
+				* Apply the extra precaution with respect to queue delay and
+				* RTP queue only if L4S is not running or when ECN marking does not occur for a longer period
+				* scl is based on the queue delay trend
+				
+				float scl = queueDelayGuard * parent->getQueueDelayTrend();
+				if (parent->isCompetingFlows())
+					scl *= 0.05f;
+				increment = increment * (1.0f - scl) - txQueueSizeFactor * txSizeBitsAvg;
+			}
+			*/
+			increment -= targetBitrate;
+			if (txSizeBits > 12000 && increment > 0)
+				increment = 0;
+
+			if (increment > 0) {
+				wasFastStart = true;
+				/* Quic. Changet to true.
+				 * Was: !parent->isCompetingFlows()
+				 * Not usable currently
+				 */ 
+				if (true) {
+					/*
+					* Limit the bitrate increase so that it does not go faster than rampUpSpeedTmp
+					* This limitation is not in effect if competing flows are detected
+					*/
+					increment *= sclI;
+					increment = std::min(increment, (float)(rampUpSpeedTmp*(kRateAdjustInterval_ntp * ntp2SecScaleFactor)));
+				}
+				if (targetBitrate > rateRtpLimit*1.25f) {
+					/*
+					* Limit increase if the target bitrate is considerably higher than the actual
+					*  bitrate, this is an indication of an idle source.
+					*/
+					increment = 0;
+				}
+			}
+			else {
+				/*
+				* Avoid that the target bitrate is reduced if it actually is the media
+				* coder that limits the output rate e.g due to inactivity
+				*/
+				if (rateRtp < targetBitrate)
+					increment = 0.0f;
+				/*
+				* Also avoid that the target bitrate is reduced if
+				* the coder bitrate is higher
+				* than the target.
+				* The possible reason is that a large I frame is transmitted, another reason is
+				* complex dynamic content.
+				*/
+				if (rateRtp > targetBitrate*2.0f)
+					increment = 0.0f;
+			}
+			targetBitrate += increment;
+		}
+		lastBitrateAdjustT_ntp = time_ntp;
+	}
+	targetBitrate = std::min(maxBitrate, std::max(minBitrate, targetBitrate));
 }
 
 /*

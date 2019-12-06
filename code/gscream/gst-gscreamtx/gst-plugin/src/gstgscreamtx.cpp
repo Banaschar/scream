@@ -73,6 +73,8 @@ enum
 {
   PROP_0,
   PROP_SILENT,
+  PROP_QUIC,
+  PROP_QUIC_NO_CC,
   PROP_MEDIA_SRC
 };
 #define DEST_HOST "127.0.0.1"
@@ -100,6 +102,14 @@ gst_g_scream_tx_class_init (GstgScreamTxClass * klass)
   g_object_class_install_property (gobject_class, PROP_SILENT,
       g_param_spec_boolean ("silent", "Silent", "Produce verbose output?",
           FALSE, G_PARAM_READWRITE));
+
+  g_object_class_install_property (gobject_class, PROP_QUIC,
+    g_param_spec_boolean ("quic", "Quic", "Use with quic transport",
+        FALSE, G_PARAM_READWRITE));
+
+  g_object_class_install_property (gobject_class, PROP_QUIC_NO_CC,
+  g_param_spec_boolean ("quic-sc", "quic-sc", "Use scream cc with quic",
+      FALSE, G_PARAM_READWRITE));
 
   g_object_class_install_property (gobject_class, PROP_MEDIA_SRC,
       g_param_spec_uint ("media-src", "Media source",
@@ -141,6 +151,9 @@ gst_g_scream_tx_init (GstgScreamTx * filter)
 
   filter->media_src = 0; // x264enc
 
+  filter->quic = FALSE;
+  filter->quicNoCC = FALSE;
+  filter->main_ssrc = 0;
 
   gst_pad_set_event_function (filter->sinkpad,
                               GST_DEBUG_FUNCPTR(gst_g_scream_tx_sink_event));
@@ -169,6 +182,12 @@ gst_g_scream_tx_set_property (GObject * object, guint prop_id,
   switch (prop_id) {
     case PROP_SILENT:
       filter->silent = g_value_get_boolean (value);
+      break;
+    case PROP_QUIC:
+      filter->quic = g_value_get_boolean(value);
+      break;
+    case PROP_QUIC_NO_CC:
+      filter->quicNoCC = g_value_get_boolean(value);
       break;
     case PROP_MEDIA_SRC:
       filter->media_src = g_value_get_uint (value);
@@ -221,7 +240,11 @@ gboolean txTimerEvent(GstClock *clock, GstClockTime t, GstClockID id, gpointer u
   guint16 sn;
 #ifdef PACKET_PACING_ON
   pthread_mutex_lock(&filter->lock_scream);
-  float retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
+  float retVal;
+  if (filter->quic)
+    retVal = filter->screamTx->isOkToTransmitQuic(time_ntp, ssrc);
+  else
+    retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
   pthread_mutex_unlock(&filter->lock_scream);
   float accRetVal = 0.0f;
   while (true && retVal >= 0 && accRetVal < PACE_CLOCK_T_S) {
@@ -241,6 +264,79 @@ gboolean txTimerEvent(GstClock *clock, GstClockTime t, GstClockID id, gpointer u
     pthread_mutex_unlock(&filter->lock_scream);
   }
 #endif
+}
+
+/* Quic feedback callback */
+static void 
+cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srtt, 
+                      guint32 cwnd, guint64 bytes_in_flight, guint64 bytes_sent,
+                      guint64 bytes_lost, guint64 bytes_acked,
+                      guint64 packets_sent, guint64 packets_lost, 
+                      guint64 packets_acked, gpointer user_data)
+{
+  GstgScreamTx *filter = (GstgScreamTx*) user_data;
+  float time;
+  guint32 time_ntp;
+  getTime(filter_,&time,&time_ntp);
+
+  if (filter->rtpSession != NULL) {
+
+    pthread_mutex_lock(&filter->lock_scream);
+
+    filter->screamTx->incomingStandardizedFeedbackQuic(
+        time_ntp, filter->main_ssrc, packets_lost, cwnd, bytes_lost,
+        bytes_acked, packets_acked);
+
+    pthread_mutex_unlock(&filter->lock_scream);
+
+    pthread_mutex_lock(&filter->lock_scream);
+
+    int rate = (int) (filter_->screamTx->getTargetBitrate(filter->main_ssrc));
+    switch (filter_->media_src) {
+      case 0: // x264enc
+      case 3: // vaapih264enc
+        rate /= 1000;
+        break;
+      case 1: // rpicamsrc
+      case 2: // uvch264src
+      case 4: // omxh264enc
+        break;
+    }
+
+    pthread_mutex_unlock(&filter_->lock_scream);
+
+    if (rate <= 0)
+      g_print("RATE: %i\n", rate);
+    if (true && rate > 0 && time-filter_->lastRateChangeT > 0.2) {
+    //if (time-filter_->lastRateChangeT > 0.1) {
+      //int rate = 1000000*(1+ (int(time/10) % 2));
+      //int qp = 20+20*(int(time/5) % 2)  ;
+      filter_->lastRateChangeT = time;
+      switch (filter_->media_src) {
+        case 0:
+        case 1:
+        case 3:
+          g_object_set(G_OBJECT(filter_->encoder), "bitrate", rate, NULL);
+          break;
+        case 2:
+          g_object_set(G_OBJECT(filter_->encoder), "average-bitrate", rate, NULL);
+          g_object_set(G_OBJECT(filter_->encoder), "peak-bitrate", rate, NULL);
+          break;
+        case 4:
+          g_object_set(G_OBJECT(filter_->encoder), "target-bitrate", rate, NULL);
+          break;
+      }
+
+      char buf2[1000];
+      pthread_mutex_lock(&filter_->lock_scream);
+      filter_->screamTx->getShortLog(time, buf2);
+      pthread_mutex_unlock(&filter_->lock_scream);
+
+      if (filter_->media_src == 1)
+        g_object_set(G_OBJECT(filter_->encoder), "annotation-text", buf2, NULL);
+      g_print("%6.3f %s\n",time,buf2);
+    }
+  }
 }
 
 /* GstElement vmethod implementations */
@@ -421,6 +517,8 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
   //gst_buffer_extract (buf, 0, pkt, size);
   if (filter->screamTx->getStreamQueue(ssrc_h) == 0) {
     g_print(" New stream, register !\n");
+    // QUIC. TODO: Something less hacky
+    filter->main_ssrc = ssrc_h;
 
     switch (filter_->media_src) {
       case 0:
@@ -448,7 +546,10 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
 
   pthread_mutex_lock(&filter->lock_scream);
   getTime(filter,&time,&time_ntp);
-  filter->screamTx->newMediaFrame(time_ntp, ssrc_h, size);
+  if (filter->quic)
+    filter->screamTx->newMediaFrameQuic(time_ntp, ssrc_h, size);
+  else
+    filter->screamTx->newMediaFrame(time_ntp, ssrc_h, size);
   pthread_mutex_unlock(&filter->lock_scream);
   if (false && time-filter->lastRateChangeT > 0.1) {
             int rate = 1000;//1000*(1+ 3*(int(time/10) % 2));
@@ -517,14 +618,19 @@ gst_g_scream_tx_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
     /*
     * Odd feature... the last parameter is not kept .. strange...
     */
-
-    g_object_set((filter->rtpSession), "rtcp-min-interval", 500000000, NULL);
-
-    g_signal_connect_after((filter->rtpSession), "on-receiving-rtcp", G_CALLBACK(on_receiving_rtcp), filter);
+    if (filter->quic) {
+      g_signal_connect(gst_bin_get_by_name_recurse_up(GST_BIN(pipe), 
+                        "rtpsink"), "on-feedback-report", 
+                        G_CALLBACK(cb_on_feedback_report), filter);
+    } else {
+      g_signal_connect_after((filter->rtpSession), "on-receiving-rtcp", 
+                              G_CALLBACK(on_receiving_rtcp), filter);
+      g_object_set((filter->rtpSession), "rtcp-min-interval", 
+                    500000000, NULL);
+    }
     //g_print("CALLBACK\n");
     filter->encoder = gst_bin_get_by_name_recurse_up(GST_BIN(pipe), "video");
-    g_assert(filter->encoder);
-    
+    g_assert(filter->encoder);    
     
     //g_object_set(G_OBJECT(filter->encoder), "bitrate", 200, NULL);
 

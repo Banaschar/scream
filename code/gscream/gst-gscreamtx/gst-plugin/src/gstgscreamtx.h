@@ -88,6 +88,12 @@ struct _GstgScreamTx
   GstClockID clockId;
 
   guint media_src;
+
+  gboolean quic;
+  gboolean quicNoCC;
+
+  // hacky, can only process one rtp stream
+  guint32 main_ssrc;
 };
 
 struct _GstgScreamTxClass

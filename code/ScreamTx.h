@@ -162,10 +162,18 @@ public:
 	RtpQueueIface * getStreamQueue(uint32_t ssrc);
 
 	/*
+	 * Quic version
+	 */
+	void newMediaFrameQuic(uint32_t time_ntp, uint32_t ssrc, int bytesRtp);
+
+	/*
 	* Call this function for each new video frame
 	*  Note : isOkToTransmit should be called after newMediaFrame
 	*/
 	void newMediaFrame(uint32_t time_ntp, uint32_t ssrc, int bytesRtp);
+
+	/* QUIC version */
+	float isOkToTransmitQuic(uint32_t time_ntp, uint32_t &ssrc);
 
 	/*
 	* Function determines if an RTP packet with SSRC can be transmitted
@@ -189,6 +197,11 @@ public:
 		uint32_t ssrc,
 		int size,
 		uint16_t seqNr);
+
+	void incomingStandardizedFeedbackQuic(uint32_t time_ntp, uint32_t ssrc, 
+									uint64_t packets_lost, 
+									uint32_t quic_cwnd, uint64_t bytes_lost,
+									uint64_t bytes_acked, uint64_t packets_acked);
 
 	/* New incoming feedback, this function
 	 * triggers a CWND update
@@ -302,6 +315,22 @@ private:
 		bool isAfterReceivedEdge;
 	};
 
+	/* QUIC */
+	struct QuicFeedback {
+	    uint32_t rtt_minimum;
+	    uint32_t rtt_smoothed;
+	    uint32_t rtt_latest;
+	    uint32_t cwnd;
+	    size_t bytes_in_flight;
+	    uint64_t bytes_sent;
+	    uint64_t bytes_lost;
+	    uint64_t bytes_acked;
+	    uint64_t packets_sent;
+	    uint64_t packets_lost;
+	    uint64_t packets_acked;
+	};
+	struct QuicFeedback fb;
+
 	/*
 	  * Statistics for the network congestion control and the
 	  *  stream[0]
@@ -350,6 +379,8 @@ private:
 		void updateRate(uint32_t time_ntp);
 
 		void updateTargetBitrateI(float br);
+
+		void updateTargetBitrateQuic(uint32_t time_ntp);
 
 		void updateTargetBitrate(uint32_t time_ntp);
 
