@@ -52,6 +52,10 @@
 #include <gst/rtp/rtp.h>
 #include "gstgscreamtx.h"
 #include "ScreamTx.h"
+#include <sys/time.h>
+
+static void gst_g_scream_tx_create_stats(GstgScreamTx *scream, char *s);
+void getTime(GstgScreamTx *filter, float *time_s, guint32 *time_ntp);
 
 #define PACKET_PACING_ON
 //#define PACKET_PACING_OFF
@@ -74,8 +78,9 @@ enum
   PROP_0,
   PROP_SILENT,
   PROP_QUIC,
-  PROP_QUIC_NO_CC,
-  PROP_MEDIA_SRC
+  PROP_QUIC_CC,
+  PROP_MEDIA_SRC,
+  PROP_STATS
 };
 #define DEST_HOST "127.0.0.1"
 
@@ -107,8 +112,8 @@ gst_g_scream_tx_class_init (GstgScreamTxClass * klass)
     g_param_spec_boolean ("quic", "Quic", "Use with quic transport",
         FALSE, G_PARAM_READWRITE));
 
-  g_object_class_install_property (gobject_class, PROP_QUIC_NO_CC,
-  g_param_spec_boolean ("quic-sc", "quic-sc", "Use scream cc with quic",
+  g_object_class_install_property (gobject_class, PROP_QUIC_CC,
+  g_param_spec_boolean ("quic-cc", "quic-cc", "Use scream with quic cc",
       FALSE, G_PARAM_READWRITE));
 
   g_object_class_install_property (gobject_class, PROP_MEDIA_SRC,
@@ -116,6 +121,15 @@ gst_g_scream_tx_class_init (GstgScreamTxClass * klass)
         "0=x264enc, 1=rpicamsrc, 2=uvch264src, 3=vaapih264enc, 4=omxh264enc",
         0, 4, 0,
         G_PARAM_READWRITE));
+
+  /*
+  g_object_class_install_property(gobject_class, PROP_STATS,
+        g_param_spec_boxed("stats", "Statistics", "Various Statistics",
+        GST_TYPE_STRUCTURE, (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+  */
+  g_object_class_install_property(gobject_class, PROP_STATS,
+        g_param_spec_string("stats", "Statistics", "Various Statistics",
+        "empty", (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
   gst_element_class_set_details_simple(gstelement_class,
     "gScreamTx",
@@ -152,7 +166,7 @@ gst_g_scream_tx_init (GstgScreamTx * filter)
   filter->media_src = 0; // x264enc
 
   filter->quic = FALSE;
-  filter->quicNoCC = FALSE;
+  filter->quic_cc = FALSE;
   filter->main_ssrc = 0;
 
   gst_pad_set_event_function (filter->sinkpad,
@@ -186,8 +200,8 @@ gst_g_scream_tx_set_property (GObject * object, guint prop_id,
     case PROP_QUIC:
       filter->quic = g_value_get_boolean(value);
       break;
-    case PROP_QUIC_NO_CC:
-      filter->quicNoCC = g_value_get_boolean(value);
+    case PROP_QUIC_CC:
+      filter->quic_cc = g_value_get_boolean(value);
       break;
     case PROP_MEDIA_SRC:
       filter->media_src = g_value_get_uint (value);
@@ -208,11 +222,32 @@ gst_g_scream_tx_get_property (GObject * object, guint prop_id,
     case PROP_SILENT:
       g_value_set_boolean (value, filter->silent);
       break;
+    case PROP_STATS:
+      gchar s[200];
+      gst_g_scream_tx_create_stats(filter, s);
+      g_value_set_string(value, s);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+}
 
+static void gst_g_scream_tx_create_stats(GstgScreamTx *scream, char *s)
+{
+  float time;
+  guint32 time_ntp;
+  getTime(scream, &time, &time_ntp);
+  pthread_mutex_lock(&scream->lock_scream);
+  scream->screamTx->getStats(time, s);
+  pthread_mutex_unlock(&scream->lock_scream);
+  /*
+  s = gst_structure_new("screamtx-stats",
+          "bitrate", G_TYPE_UINT, what?,
+          "cwnd", G_TYPE_UINT, what?,
+          "base-owd", G_TYPE_UINT, what?,
+          "queue-delay", G_TYPE_UINT, what?, NULL);
+  */
 }
 
 void getTime(GstgScreamTx *filter, float *time_s, guint32 *time_ntp)
@@ -241,10 +276,13 @@ gboolean txTimerEvent(GstClock *clock, GstClockTime t, GstClockID id, gpointer u
 #ifdef PACKET_PACING_ON
   pthread_mutex_lock(&filter->lock_scream);
   float retVal;
+  /*
   if (filter->quic)
     retVal = filter->screamTx->isOkToTransmitQuic(time_ntp, ssrc);
   else
     retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
+  */
+  retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
   pthread_mutex_unlock(&filter->lock_scream);
   float accRetVal = 0.0f;
   while (true && retVal >= 0 && accRetVal < PACE_CLOCK_T_S) {
@@ -260,32 +298,92 @@ gboolean txTimerEvent(GstClock *clock, GstClockTime t, GstClockID id, gpointer u
     pthread_mutex_lock(&filter->lock_scream);
     getTime(filter,&time,&time_ntp);
     filter->screamTx->addTransmitted(time_ntp, ssrc, size, sn);
+    /*
+    if (filter->quic)
+      retVal = filter->screamTx->isOkToTransmitQuic(time_ntp, ssrc);
+    else
+      retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
+    */
     retVal = filter->screamTx->isOkToTransmit(time_ntp, ssrc);
     pthread_mutex_unlock(&filter->lock_scream);
   }
 #endif
 }
 
+guint32 convert_to_ntp(guint64 timestamp)
+{
+  timestamp *= 1000000; // to ns
+  guint32 ret;
+  timestamp /= 1000;
+  timestamp *= 256;
+  timestamp /= 1000;
+  timestamp *= 256;
+  timestamp /= 1000;
+
+  return ret = (timestamp) & 0xFFFFFFFF;
+}
+
 /* Quic feedback callback */
 static void 
-cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srtt, 
-                      guint32 cwnd, guint64 bytes_in_flight, guint64 bytes_sent,
-                      guint64 bytes_lost, guint64 bytes_acked,
-                      guint64 packets_sent, guint64 packets_lost, 
-                      guint64 packets_acked, gpointer user_data)
+cb_on_feedback_report(GstElement *ele, 
+                      guint64 packets_sent, guint64 packets_lost, guint64 packets_acked,
+                      guint64 bytes_sent, guint64 bytes_lost, guint64 bytes_acked,
+                      guint64 latest_ack_send_time, guint64 latest_ack_recv_time,
+                      guint64 bytes_in_flight, guint32 cwnd, gint64 now, gpointer user_data)
 {
   GstgScreamTx *filter = (GstgScreamTx*) user_data;
   float time;
   guint32 time_ntp;
   getTime(filter_,&time,&time_ntp);
+  //g_print("TIME: %f\n", time);
 
   if (filter->rtpSession != NULL) {
 
     pthread_mutex_lock(&filter->lock_scream);
 
-    filter->screamTx->incomingStandardizedFeedbackQuic(
-        time_ntp, filter->main_ssrc, packets_lost, cwnd, bytes_lost,
-        bytes_acked, packets_acked);
+    if (filter->quic_cc) {
+      filter->screamTx->incomingStandardizedFeedbackQuic(
+                        time_ntp, filter->main_ssrc, packets_lost, cwnd, bytes_lost,
+                        bytes_acked, packets_acked);
+    } else {
+      //g_print("OriginalRTT: %lu\n", latest_ack_recv_time - latest_ack_send_time);
+      //float ntp2SecScaleFactor = 1.0 / 65536;
+      //guint64 diff = latest_ack_recv_time - latest_ack_send_time;
+      //guint32 diff2 = convert_to_ntp(latest_ack_recv_time) - convert_to_ntp(latest_ack_send_time);
+      //g_print("DIFF: %lu\n", diff);
+      //g_print("DIFF_NTP: %u\n", convert_to_ntp(diff));
+      //g_print("DIFF_NTP2SCALE: %1.3f\n", diff2*ntp2SecScaleFactor);
+      
+      //GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+      //g_print("TIMESTAMP: %lu\n", now);
+      //struct timeval tv;
+      //gettimeofday(&tv, NULL);
+      //gint64 now = (gint64)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+      //time_t x = now / 1000000;
+      //printf("current time is %s",ctime(&x));
+      //time_t x = latest_ack_send_time;
+      //printf("Sent time is %s",ctime(&x));
+      /*
+      guint64 ref = filter->gstClockTimeRef / 1000000;
+      now = now / 1000000;
+      now -= ref;
+      g_print("Time Now in ms: %lu\n", now);
+      guint64 senttime = latest_ack_send_time - ref;
+      g_print("Time Sent in ms: %lu\n", senttime);
+      */
+      //now -= filter->gstClockTimeRef;
+      //guint64 setime = latest_ack_send_time * 1000000;
+      //setime -= filter->gstClockTimeRef;
+      //if (setime > now)
+        //g_print("FAIL\n");
+      //g_print("NOW: %1.3f, SENT: %1.3f\n", (now / 1.0e9f), (setime / 1.0e9f));
+      
+      //g_print("Sent time: %1.3f\n", setime / 1.0e9f);
+      filter->screamTx->incomingStandardizedFeedbackQuic(
+                        time_ntp, filter->main_ssrc, packets_lost, bytes_lost,
+                        bytes_acked, packets_acked, convert_to_ntp(latest_ack_send_time), convert_to_ntp(latest_ack_recv_time), convert_to_ntp(now));
+    }
+
 
     pthread_mutex_unlock(&filter->lock_scream);
 
@@ -305,8 +403,8 @@ cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srt
 
     pthread_mutex_unlock(&filter_->lock_scream);
 
-    if (rate <= 0)
-      g_print("RATE: %i\n", rate);
+    //if (rate <= 0)
+      //g_print("RATE: %i\n", rate);
     if (true && rate > 0 && time-filter_->lastRateChangeT > 0.2) {
     //if (time-filter_->lastRateChangeT > 0.1) {
       //int rate = 1000000*(1+ (int(time/10) % 2));
@@ -326,15 +424,18 @@ cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srt
           g_object_set(G_OBJECT(filter_->encoder), "target-bitrate", rate, NULL);
           break;
       }
-
+      /*
       char buf2[1000];
       pthread_mutex_lock(&filter_->lock_scream);
       filter_->screamTx->getShortLog(time, buf2);
       pthread_mutex_unlock(&filter_->lock_scream);
-
+      g_print("%6.3f %s\n",time,buf2);
+      //g_print("Bytes in flight: %lu\n", bytes_in_flight);
+      */
+      /*
       if (filter_->media_src == 1)
         g_object_set(G_OBJECT(filter_->encoder), "annotation-text", buf2, NULL);
-      g_print("%6.3f %s\n",time,buf2);
+      */
     }
   }
 }
@@ -432,15 +533,17 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
                 g_object_set(G_OBJECT(filter_->encoder), "target-bitrate", rate, NULL);
                 break;
             }
-
+            /*
             char buf2[1000];
             pthread_mutex_lock(&filter_->lock_scream);
             filter_->screamTx->getShortLog(time, buf2);
             pthread_mutex_unlock(&filter_->lock_scream);
-
+            g_print("%6.3f %s\n",time,buf2);
+            */
+            /*
             if (filter_->media_src == 1)
               g_object_set(G_OBJECT(filter_->encoder), "annotation-text", buf2, NULL);
-            g_print("%6.3f %s\n",time,buf2);
+            */
           }
 
 
@@ -516,7 +619,7 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
     //  size , pt, sn_h, ssrc_h, time_ntp, time);
   //gst_buffer_extract (buf, 0, pkt, size);
   if (filter->screamTx->getStreamQueue(ssrc_h) == 0) {
-    g_print(" New stream, register !\n");
+    //g_print(" New stream, register !\n");
     // QUIC. TODO: Something less hacky
     filter->main_ssrc = ssrc_h;
 
@@ -546,10 +649,13 @@ gst_g_scream_tx_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
 
   pthread_mutex_lock(&filter->lock_scream);
   getTime(filter,&time,&time_ntp);
+  /*
   if (filter->quic)
     filter->screamTx->newMediaFrameQuic(time_ntp, ssrc_h, size);
   else
     filter->screamTx->newMediaFrame(time_ntp, ssrc_h, size);
+  */
+  filter->screamTx->newMediaFrame(time_ntp, ssrc_h, size);
   pthread_mutex_unlock(&filter->lock_scream);
   if (false && time-filter->lastRateChangeT > 0.1) {
             int rate = 1000;//1000*(1+ 3*(int(time/10) % 2));

@@ -90,7 +90,7 @@ struct _GstgScreamTx
   guint media_src;
 
   gboolean quic;
-  gboolean quicNoCC;
+  gboolean quic_cc;
 
   // hacky, can only process one rtp stream
   guint32 main_ssrc;

@@ -408,7 +408,7 @@ float ScreamTx::isOkToTransmitQuic(uint32_t time_ntp, uint32_t &ssrc) {
 		* Irrelevant for one stream
 		* TODO: needs queue delay stuff
 		*/
-		//adjustPriorities(time_ntp);
+		adjustPriorities(time_ntp);
 
 		/*
 		* Update maxRate
@@ -462,8 +462,37 @@ float ScreamTx::isOkToTransmitQuic(uint32_t time_ntp, uint32_t &ssrc) {
 	* Update bytes in flight history for congestion window validation
 	* Quic: Skip, we don't need this
 	* TODO: Think about that
+	* I DO NEED THAT, when I use scream cc
 	*/
-	// mising here
+	if (time_ntp - lastBytesInFlightT_ntp > kBytesInFlightHistInterval_ntp) {
+		bytesInFlightMaxLo = 0;
+		if (nAccBytesInFlightMax > 0) {
+			bytesInFlightMaxLo = accBytesInFlightMax / nAccBytesInFlightMax;
+		}
+		bytesInFlightHistLo[bytesInFlightHistPtr] = bytesInFlightMaxLo;
+		bytesInFlightHistHi[bytesInFlightHistPtr] = bytesInFlightMaxHi;
+		bytesInFlightHistPtr = (bytesInFlightHistPtr + 1) % bytesInFlightHistSize;
+		lastBytesInFlightT_ntp = time_ntp;
+		accBytesInFlightMax = 0;
+		nAccBytesInFlightMax = 0;
+		bytesInFlightMaxHi = 0;
+		bytesInFlightHistLoMem = 0;
+		bytesInFlightHistHiMem = 0;
+		for (int n = 0; n < bytesInFlightHistSize; n++) {
+			bytesInFlightHistLoMem = std::max(bytesInFlightHistLoMem, bytesInFlightHistLo[n]);
+			bytesInFlightHistHiMem = std::max(bytesInFlightHistHiMem, bytesInFlightHistHi[n]);
+		}
+
+		/*
+		* In addition, reset MSS, this is useful in case for instance
+		* a video stream is put on hold, leaving only audio packets to be
+		* transmitted
+		*/
+		mss = kInitMss;
+		if (!openWindow)
+			cwndMin = std::max(cwndMinLow,kMinCwndMss * mss);
+		cwnd = max(cwnd, cwndMin);
+	}
 
 	int sizeOfNextRtp = stream->rtpQueue->sizeOfNextRtp();
 	if (sizeOfNextRtp == -1) {
@@ -836,6 +865,89 @@ void ScreamTx::incomingStandardizedFeedback(uint32_t time_ntp,
 }
 
 /*
+ * Use scream cc
+ */ 
+void ScreamTx::incomingStandardizedFeedbackQuic(uint32_t time_ntp,
+	uint32_t ssrc, uint64_t packets_lost, uint64_t bytes_lost,
+	uint64_t bytes_acked, uint64_t packets_acked, uint32_t send_time, uint32_t recv_time, uint32_t now) {
+	int streamId = -1;
+
+	// TODO: Do I need this?
+	accBytesInFlightMax += bytesInFlight;
+	nAccBytesInFlightMax++;
+	Stream *stream = getStream(ssrc, streamId);
+	if (stream == 0) {
+		return;
+	}
+	/* timestamp convert like in incomingStandardizedFeedback FIRST FUNCTION */
+	/* timestamp stuff from markAcked*/
+	ackedOwd = recv_time - send_time;
+	//printf("timestamp: %1.6f, send_time: %1.6f\n", recv_time*ntp2SecScaleFactor, send_time*ntp2SecScaleFactor);
+	//printf("ackedOwd: %1.3f\n", ackedOwd*ntp2SecScaleFactor);
+	uint32_t qDel = estimateOwd(time_ntp);
+	qDel -= getBaseOwd();
+	queueDelay = qDel * ntp2SecScaleFactor;
+	//printf("ackedOwd: %1.3f, queueDelay: %1.3f\n", ackedOwd*ntp2SecScaleFactor, queueDelay);
+	uint32_t rtt = now - send_time; 
+	//printf("RTT: %1.3f\n", rtt*ntp2SecScaleFactor);
+
+	if (rtt < 1000000) {
+		sRttSh_ntp = (7 * sRttSh_ntp + rtt) / 8;
+		if (time_ntp - lastSRttUpdateT_ntp > sRttSh_ntp) {
+			sRtt_ntp = (7 * sRtt_ntp + sRttSh_ntp) / 8;
+			lastSRttUpdateT_ntp = time_ntp;
+			sRtt = sRtt_ntp * ntp2SecScaleFactor;
+			//g_print("sRtt: %1.3f\n", sRtt);
+		}
+	}
+	//stream->timeTxAck_ntp = send_time; /* ? I don't need that, and I don't have that */
+
+	/* loss handling */
+	if (packets_lost > fb.packets_lost) {
+		fb.packets_lost = packets_lost;
+		stream->repairLoss = true;
+		stream->lossEventFlag = true;
+		lossEvent = true;
+		lastLossEventT_ntp = time_ntp;
+		for (int n = 0; n < nStreams; n++) {
+			Stream *tmp = streams[n];
+			if (lossEvent)
+				tmp->lossEventFlag = true;
+			else
+				tmp->ecnCeEventFlag = true;
+		}
+	}
+	fb.packets_lost = packets_lost;
+
+	/* bytes_acked */
+	stream->bytesLost = bytes_lost - fb.bytes_lost;
+	stream->bytesAcked = bytes_acked - fb.bytes_acked;
+	bytesNewlyAcked = (bytes_acked - fb.bytes_acked) - 22 * (packets_acked - fb.packets_acked); //Lazy - remove the quic overhead
+	bytesInFlight -= bytesNewlyAcked;
+	if (bytesInFlight < 0)
+		bytesInFlight = 0;
+
+	fb.bytes_acked = bytes_acked;
+	fb.bytes_lost = bytes_lost;
+	fb.packets_acked = packets_acked;
+
+	/* TODO:
+	 * Maybe update cwnd everytime it's updated by quic?
+	 */
+	if (lastCwndUpdateT_ntp == 0)
+		lastCwndUpdateT_ntp = time_ntp;
+
+	if (time_ntp - lastCwndUpdateT_ntp > 655) { // 10ms in NTP domain
+		/*
+		* There is no gain with a too frequent CWND update
+		* An update every 10ms is fast enough even at very high high bitrates
+		*/
+		updateCwnd(time_ntp);
+		lastCwndUpdateT_ntp = time_ntp;
+	}
+}
+
+/*
  * Use all quic values directly, e.g. congestion control is done by quic
  * Therefore we set the cwnd directly
  */ 
@@ -843,7 +955,7 @@ void ScreamTx::incomingStandardizedFeedbackQuic(uint32_t time_ntp,
 	uint32_t ssrc, uint64_t packets_lost, uint32_t quic_cwnd, uint64_t bytes_lost,
 	uint64_t bytes_acked, uint64_t packets_acked) {
 	int streamId = -1;
-
+	printf("USING QUIC CC\n");
 	// TODO: Do I need this?
 	accBytesInFlightMax += bytesInFlight;
 	nAccBytesInFlightMax++;
@@ -856,6 +968,7 @@ void ScreamTx::incomingStandardizedFeedbackQuic(uint32_t time_ntp,
 		fb.packets_lost = packets_lost;
 		stream->repairLoss = true;
 		stream->lossEventFlag = true;
+		lossEvent = true;
 		lastLossEventT_ntp = time_ntp;
 		for (int n = 0; n < nStreams; n++) {
 			Stream *tmp = streams[n];
@@ -1009,6 +1122,8 @@ void ScreamTx::markAcked(uint32_t time_ntp,
 			}
 			tmp->isAcked = true;
 			ackedOwd = timestamp - tmp->timeTx_ntp;
+			//printf("timestamp: %1.3f, send_time: %1.3f\n", timestamp*ntp2SecScaleFactor, tmp->timeTx_ntp*ntp2SecScaleFactor);
+			//printf("ackedOwd: %1.3f\n", ackedOwd*ntp2SecScaleFactor);
 			/*
 			* Compute the queue delay i NTP domain (Q16)
 			*/
@@ -1020,17 +1135,20 @@ void ScreamTx::markAcked(uint32_t time_ntp,
 			queueDelay = qDel * ntp2SecScaleFactor;
 
 			uint32_t rtt = time_ntp - tmp->timeTx_ntp;
+			//printf("RTT: %1.3f\n", rtt*ntp2SecScaleFactor);
 
 			if (fp_log && isLast) {
 				fprintf(fp_log, "%1.3f,%1.3f,%1.3f,", time_ntp*ntp2SecScaleFactor, queueDelay, rtt*ntp2SecScaleFactor);
 				completeLogItem = true;
 			}
 			if (rtt < 1000000 && isLast) {
+				//printf("ackedOwd: %1.3f, queueDelay: %1.3f\n", ackedOwd*ntp2SecScaleFactor, queueDelay);
 				sRttSh_ntp = (7 * sRttSh_ntp + rtt) / 8;
 				if (time_ntp - lastSRttUpdateT_ntp > sRttSh_ntp) {
 					sRtt_ntp = (7 * sRtt_ntp + sRttSh_ntp) / 8;
 					lastSRttUpdateT_ntp = time_ntp;
 					sRtt = sRtt_ntp * ntp2SecScaleFactor;
+					//printf("sRTT: %1.3f\n", sRtt);
 				}
 			}
 			stream->timeTxAck_ntp = tmp->timeTx_ntp;
@@ -1148,21 +1266,39 @@ void ScreamTx::getLog(float time, char *s) {
 	}
 }
 
-void ScreamTx::getShortLog(float time, char *s) {
+void ScreamTx::getStats(float time, char *s) {
 	int inFlightMax = std::max(bytesInFlight, bytesInFlightHistHiMem);
-	sprintf(s, "Log: %4.3f, %4.3f, %6d, %6d, %6.0f, %1d, ",
-		queueDelayMax, sRtt,
-		cwnd, bytesInFlightLog, rateTransmitted / 1000.0f, isInFastStart());
+	sprintf(s, "%.3f,%0.3f,%.3f,%.0d,%.0d,%.0f,",
+		queueDelay, baseOwd*ntp2SecScaleFactor, sRtt,
+		cwnd, bytesInFlightLog, rateTransmitted / 1000.0f);
 	bytesInFlightLog = bytesInFlight;
 	queueDelayMax = 0.0;
 	for (int n = 0; n < nStreams; n++) {
 		Stream *tmp = streams[n];
 		char s2[200];
-		sprintf(s2, "PerStream: %4.3f, %6.0f, %6.0f, %6.0f, %5.0f, ",
+		sprintf(s2, "%.0f,%.0f,%.0f",
+			tmp->targetBitrate / 1000.0f, tmp->rateRtp / 1000.0f,
+			//tmp->rateTransmitted / 1000.0f,
+			tmp->rateLost / 1000.0f);
+		strcat(s, s2);
+	}
+}
+
+void ScreamTx::getShortLog(float time, char *s) {
+	int inFlightMax = std::max(bytesInFlight, bytesInFlightHistHiMem);
+	sprintf(s, "sc:%.3f,%.3f,%0.3f, %.3f,%.0d,%.0d,%.0f,",
+		queueDelayMax, queueDelay, baseOwd*ntp2SecScaleFactor, sRtt,
+		cwnd, bytesInFlightLog, rateTransmitted / 1000.0f);
+	bytesInFlightLog = bytesInFlight;
+	queueDelayMax = 0.0;
+	for (int n = 0; n < nStreams; n++) {
+		Stream *tmp = streams[n];
+		char s2[200];
+		sprintf(s2, "%.3f,%.0f,%.0f,%.0f,%.0f,%i",
 			std::max(0.0f, tmp->rtpQueue->getDelay(time)),
 			tmp->targetBitrate / 1000.0f, tmp->rateRtp / 1000.0f,
 			tmp->rateTransmitted / 1000.0f,
-			tmp->rateLost / 1000.0f);
+			tmp->rateLost / 1000.0f, tmp->rtpQueue->sizeOfQueue());
 		strcat(s, s2);
 	}
 }
@@ -1220,6 +1356,7 @@ void ScreamTx::updateCwnd(uint32_t time_ntp) {
 	* than the 1.25 times the average amount of bytes that transmitted in the given feedback interval
 	*/
 	float bytesNewlyAckedLimited = float(bytesNewlyAcked);
+	//printf("bytes: %.0f\n", bytesNewlyAckedLimited);
 	if (maxRate > 1.0e5f)
 		bytesNewlyAckedLimited = std::min(bytesNewlyAckedLimited, 1.25f*maxRate*dT / 8.0f);
 	else
@@ -1314,6 +1451,7 @@ void ScreamTx::updateCwnd(uint32_t time_ntp) {
 		maxBytesInFlight =
 			(maxBytesInFlightHi*(1.0f - alpha) + maxBytesInFlightLo * alpha)*
 			kMaxBytesInFlightHeadRoom;
+		//printf("maxflight: %.0f, alpha: %.3f, hi: %i, lo: %i\n", maxBytesInFlight, alpha, maxBytesInFlightHi, maxBytesInFlightLo);
 		if (enableSbd) {
 			/*
 			* Shared bottleneck detection,
@@ -1466,7 +1604,11 @@ void ScreamTx::updateCwnd(uint32_t time_ntp) {
 	* not considerably higher than the actual number of bytes in flight
 	*/
 	if (maxBytesInFlight > 5000) {
-		cwnd = std::min(cwnd, (int)maxBytesInFlight);
+		//g_print("maxBytesInFlight: %.0f\n", maxBytesInFlight);
+		if (cwnd - (int)maxBytesInFlight < 5000)
+			cwnd = cwnd + 2000;
+		else
+			cwnd = std::min(cwnd, (int)maxBytesInFlight);
 	}
 
 	if (sRtt < 0.01f && queueDelayTrend < 0.1) {
@@ -2333,6 +2475,7 @@ void ScreamTx::Stream::updateTargetBitrate(uint32_t time_ntp) {
 			* throughput in the initial phase.
 			*/
 			cerr << "Size of discarded queue: " << rtpQueue->sizeOfQueue() << endl;
+			cerr << "rtpQueueDelay: " << rtpQueueDelay << ", MaxRtpQueueDelay: " << maxRtpQueueDelay << endl;
 			rtpQueue->clear();
 			cerr << time_ntp / 65536.0f << " RTP queue discarded for SSRC " << ssrc << endl;
 

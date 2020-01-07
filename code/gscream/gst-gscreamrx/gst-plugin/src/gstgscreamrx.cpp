@@ -431,9 +431,6 @@ gst_g_scream_rx_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       filter->clockId=gst_clock_new_periodic_id(clock,gst_clock_get_internal_time(clock),5000000);
       g_assert(filter->clockId);
       GstClockReturn t = gst_clock_id_wait_async(filter->clockId, rtcpPeriodicTimer, (gpointer) filter, NULL);
-      g_print("SINK EVENT \n");
-
-      g_print("\n\n  ENABLE CALLBACK  \n\n");
       g_object_set((filter->rtpSession),
         "rtcp-min-interval", 500000000,
         "rtcp-fraction", 0.5,

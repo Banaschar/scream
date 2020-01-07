@@ -198,6 +198,10 @@ public:
 		int size,
 		uint16_t seqNr);
 
+	void incomingStandardizedFeedbackQuic(uint32_t time_ntp,
+		uint32_t ssrc, uint64_t packets_lost, uint64_t bytes_lost,
+		uint64_t bytes_acked, uint64_t packets_acked, uint32_t send_time, uint32_t recv_time, uint32_t now);
+
 	void incomingStandardizedFeedbackQuic(uint32_t time_ntp, uint32_t ssrc, 
 									uint64_t packets_lost, 
 									uint32_t quic_cwnd, uint64_t bytes_lost,
@@ -270,6 +274,11 @@ public:
 	*/
 	void getShortLog(float time, char *s);
 
+	/*
+	* Get stats 
+	*/
+	void getStats(float time, char *s);
+	
 	/*
 	* Get verbose log information
 	*/
