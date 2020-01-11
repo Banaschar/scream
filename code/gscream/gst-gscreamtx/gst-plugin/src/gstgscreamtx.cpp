@@ -127,6 +127,9 @@ gst_g_scream_tx_class_init (GstgScreamTxClass * klass)
         g_param_spec_boxed("stats", "Statistics", "Various Statistics",
         GST_TYPE_STRUCTURE, (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
   */
+  /* Use a single string as stats instead of the normal GstStructure
+   * Makes it easier to use the existing loging functions
+   */
   g_object_class_install_property(gobject_class, PROP_STATS,
         g_param_spec_string("stats", "Statistics", "Various Statistics",
         "empty", (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
@@ -512,8 +515,7 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
               break;
           }
           pthread_mutex_unlock(&filter_->lock_scream);
-          if (rate <= 0)
-            g_print("RATE: %i\n", rate);
+          
           if (true && rate > 0 && time-filter_->lastRateChangeT > 0.2) {
           //if (time-filter_->lastRateChangeT > 0.1) {
             //int rate = 1000000*(1+ (int(time/10) % 2));

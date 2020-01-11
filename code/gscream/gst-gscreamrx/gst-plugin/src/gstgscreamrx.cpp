@@ -165,7 +165,6 @@ gst_g_scream_rx_init (GstgScreamRx * filter)
 
   filter->gstClockTimeRef = gst_clock_get_time(gst_system_clock_obtain());
   filter->screamRx = new ScreamRx(0); // Note SSRC should be something else
-  g_print("\n*************INIT*************\n\n");
 
   filter->rtpSession = NULL;
   filter->lastRxTime = 0.0;
