@@ -2406,7 +2406,7 @@ void ScreamTx::Stream::updateTargetBitrate(uint32_t time_ntp) {
 			}
 		}
 		float rtpQueueDelay = rtpQueue->getDelay(time_ntp * ntp2SecScaleFactor);
-		if (rtpQueueDelay > maxRtpQueueDelay &&
+		if (rtpQueueDelay > maxRtpQueueDelay && (time_ntp * ntp2SecScaleFactor > 1.1) &&
 			(time_ntp - lastRtpQueueDiscardT_ntp > kMinRtpQueueDiscardInterval_ntp)) {
 			/*
 			* RTP queue is cleared as it is becoming too large,
@@ -2467,7 +2467,7 @@ void ScreamTx::Stream::updateTargetBitrate(uint32_t time_ntp) {
 		}
 
 		float rtpQueueDelay = rtpQueue->getDelay(time_ntp * ntp2SecScaleFactor);
-		if (rtpQueueDelay > maxRtpQueueDelay &&
+		if (rtpQueueDelay > maxRtpQueueDelay && (time_ntp * ntp2SecScaleFactor > 1.1) &&
 			(time_ntp - lastRtpQueueDiscardT_ntp > kMinRtpQueueDiscardInterval_ntp)) {
 			/*
 			* RTP queue is cleared as it is becoming too large,

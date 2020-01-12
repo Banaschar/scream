@@ -503,7 +503,6 @@ if (DOSCREAM)  {
 
   //g_print ("%d %d %d %x %d %f\n",
   //    size , pt, sn_h, ssrc_h, time_ntp, time);
-
   if (time - filter->lastRxTime > 2.0) {
     pthread_mutex_lock(&filter->lock_scream);
     delete filter->screamRx;

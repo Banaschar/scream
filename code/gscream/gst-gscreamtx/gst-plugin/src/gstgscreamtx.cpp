@@ -515,7 +515,7 @@ on_receiving_rtcp(GObject *session, GstBuffer *buffer, gboolean early, GObject *
               break;
           }
           pthread_mutex_unlock(&filter_->lock_scream);
-          
+
           if (true && rate > 0 && time-filter_->lastRateChangeT > 0.2) {
           //if (time-filter_->lastRateChangeT > 0.1) {
             //int rate = 1000000*(1+ (int(time/10) % 2));
