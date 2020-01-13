@@ -337,16 +337,16 @@ cb_on_feedback_report(GstElement *ele,
   GstgScreamTx *filter = (GstgScreamTx*) user_data;
   float time;
   guint32 time_ntp;
-  getTime(filter_,&time,&time_ntp);
   //g_print("TIME: %f\n", time);
 
-  if (filter->rtpSession != NULL) {
+  if (filter_->rtpSession != NULL) {
 
     pthread_mutex_lock(&filter->lock_scream);
+    getTime(filter_,&time,&time_ntp);
 
-    if (filter->quic_cc) {
-      filter->screamTx->incomingStandardizedFeedbackQuic(
-                        time_ntp, filter->main_ssrc, packets_lost, cwnd, bytes_lost,
+    if (filter_->quic_cc) {
+      filter_->screamTx->incomingStandardizedFeedbackQuic(
+                        time_ntp, filter_->main_ssrc, packets_lost, cwnd, bytes_lost,
                         bytes_acked, packets_acked);
     } else {
       //g_print("OriginalRTT: %lu\n", latest_ack_recv_time - latest_ack_send_time);
@@ -382,17 +382,17 @@ cb_on_feedback_report(GstElement *ele,
       //g_print("NOW: %1.3f, SENT: %1.3f\n", (now / 1.0e9f), (setime / 1.0e9f));
       
       //g_print("Sent time: %1.3f\n", setime / 1.0e9f);
-      filter->screamTx->incomingStandardizedFeedbackQuic(
-                        time_ntp, filter->main_ssrc, packets_lost, bytes_lost,
+      filter_->screamTx->incomingStandardizedFeedbackQuic(
+                        time_ntp, filter_->main_ssrc, packets_lost, bytes_lost,
                         bytes_acked, packets_acked, convert_to_ntp(latest_ack_send_time), convert_to_ntp(latest_ack_recv_time), convert_to_ntp(now));
     }
 
 
-    pthread_mutex_unlock(&filter->lock_scream);
+    pthread_mutex_unlock(&filter_->lock_scream);
 
-    pthread_mutex_lock(&filter->lock_scream);
+    pthread_mutex_lock(&filter_->lock_scream);
 
-    int rate = (int) (filter_->screamTx->getTargetBitrate(filter->main_ssrc));
+    int rate = (int) (filter_->screamTx->getTargetBitrate(filter_->main_ssrc));
     switch (filter_->media_src) {
       case 0: // x264enc
       case 3: // vaapih264enc
